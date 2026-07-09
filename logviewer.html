@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reinstall Logs</title>
+  <style>
+    :root {
+      --btn: #0099FF;
+      --btn-hover: #00CCFF;
+      --text: #0b1220;
+      --bg: #ffffff;
+      --shadow: rgba(0, 0, 0, 0.15);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { height: 100%; }
+
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+
+    /* Status backgrounds (scope kept to container for safety) */
+    .status-done #log-container { background-color: #cfc; }
+    .status-error #log-container { background-color: #fcc; }
+
+    /* Log area */
+    #log-container {
+      height: 100vh;               /* Fill viewport height */
+      margin: 0;
+      padding: 12px 16px 72px;     /* Bottom padding so the FAB doesn't cover text */
+      overflow-y: auto;
+      white-space: pre-wrap;       /* Wrap very long lines */
+      word-break: break-word;
+      line-height: 1.35;
+      font-size: 13px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      background: #f9fafb;
+      border-top: 1px solid #eef1f5;
+    }
+
+    /* Floating Action Button */
+    #scroll-to-bottom {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background-color: var(--btn);
+      color: #fff;
+      border: none;
+      cursor: pointer;
+      display: none; /* toggled via JS */
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      box-shadow: 0 6px 18px var(--shadow);
+    }
+    #scroll-to-bottom:hover { background-color: var(--btn-hover); }
+    #scroll-to-bottom:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+    #scroll-to-bottom svg { fill: #fff; width: 28px; height: 28px; }
+
+    /* Optional small header (hidden; kept for extensibility) */
+    header { display:none; }
+  </style>
+</head>
+<body>
+  <pre id="log-container" aria-live="polite" aria-atomic="false"></pre>
+
+  <button id="scroll-to-bottom" type="button" aria-label="Scroll to bottom" title="Scroll to bottom">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10l7 7 7-7H5z"/></svg>
+  </button>
+
+  <!-- ReconnectingWebSocket (reliable CDN). You may self-host if preferred. -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/reconnecting-websocket/1.0.0/reconnecting-websocket.min.js"></script>
+
+  <script>
+    (function () {
+      const logContainer = document.getElementById('log-container');
+      const scrollBtn = document.getElementById('scroll-to-bottom');
+
+      let shouldScrollToBottom = true;   // auto-follow tail while user is at bottom
+
+      // Calculate protocol safely to avoid mixed content under HTTPS
+      const wsProtocol = (location.protocol === 'https:') ? 'wss:' : 'ws:';
+      const wsUrl = wsProtocol + '//' + location.host + '/'; // add a path if your backend expects one
+
+      const ws = new ReconnectingWebSocket(wsUrl);
+
+      // ---- Scrolling helpers ----
+      function isAtBottom(el) {
+        // Allow a 1px leeway due to rounding
+        return Math.ceil(el.scrollTop + el.clientHeight) >= el.scrollHeight;
+      }
+      function updateFabVisibility() {
+        scrollBtn.style.display = isAtBottom(logContainer) ? 'none' : 'block';
+      }
+      function jumpToBottom() {
+        logContainer.scrollTop = logContainer.scrollHeight;
+      }
+
+      scrollBtn.addEventListener('click', jumpToBottom);
+      logContainer.addEventListener('scroll', () => {
+        const atBottom = isAtBottom(logContainer);
+        shouldScrollToBottom = atBottom;
+        updateFabVisibility();
+      }, { passive: true });
+
+      // ---- Efficient append with buffering ----
+      const MAX_LINES = 5000; // cap for memory/perf
+      let buffer = [];
+      let flushScheduled = false;
+      let lineCount = 0; // track total lines in the DOM
+
+      function countNewlines(str) {
+        // Fast-ish newline count
+        let n = 0, idx = -1;
+        while ((idx = str.indexOf('\n', idx + 1)) !== -1) n++;
+        return n;
+      }
+
+      function appendLog(chunk) {
+        // Ensure string
+        const text = String(chunk);
+        buffer.push(text);
+        if (!flushScheduled) {
+          flushScheduled = true;
+          requestAnimationFrame(flushBuffer);
+        }
+      }
+
+      function flushBuffer() {
+        if (buffer.length) {
+          // Prefix a newline if container already has content
+          const needsLeadingNewline = logContainer.textContent.length > 0;
+          const joined = (needsLeadingNewline ? '\n' : '') + buffer.join('\n');
+          buffer = [];
+
+          // Append as a single TextNode to minimize reflows
+          const node = document.createTextNode(joined);
+          logContainer.append(node);
+
+          // Update line count roughly (each '\n' adds a line break)
+          lineCount += countNewlines(joined) + (needsLeadingNewline ? 0 : 1);
+
+          // Trim if we exceed cap
+          if (lineCount > MAX_LINES) {
+            trimToMaxLines();
+          }
+
+          if (shouldScrollToBottom) {
+            jumpToBottom();
+          }
+          updateFabVisibility();
+        }
+        flushScheduled = false;
+      }
+
+      function trimToMaxLines() {
+        // Fallback trimming using textContent. This is O(n) but runs infrequently.
+        const lines = logContainer.textContent.split('\n');
+        if (lines.length > MAX_LINES) {
+          const excess = lines.length - MAX_LINES;
+          const trimmed = lines.slice(excess).join('\n');
+          logContainer.textContent = trimmed;
+          lineCount = MAX_LINES; // reset counter to cap
+        }
+      }
+
+      // ---- WebSocket events ----
+      ws.onopen = function () {
+        appendLog('WebSocket Connected.');
+      };
+      ws.onclose = function () {
+        appendLog('WebSocket Disconnected.');
+      };
+      ws.onerror = function () {
+        // Connection errors shouldn't spam the UI; keep it minimal
+        appendLog('WebSocket Error.');
+      };
+      ws.onmessage = function (event) {
+        const data = String(event.data);
+        appendLog(data);
+
+        // Status flags parsed from stream
+        if (data.includes('***** START TRANS *****')) {
+          document.body.classList.remove('status-error', 'status-done');
+        } else if (data.includes('***** ERROR *****')) {
+          document.body.classList.remove('status-done');
+          document.body.classList.add('status-error');
+        } else if (data.includes('***** DONE *****')) {
+          document.body.classList.remove('status-error');
+          document.body.classList.add('status-done');
+        }
+      };
+
+      // Initial FAB state on load
+      updateFabVisibility();
+
+      // Optional: expose a tiny API for debugging in console
+      window.__logViewer = {
+        append: appendLog,
+        clear() { logContainer.textContent = ''; lineCount = 0; updateFabVisibility(); },
+        jumpToBottom,
+      };
+    })();
+  </script>
+</body>
+</html>
