@@ -12,6 +12,6 @@ jobs:
           fetch-depth: 0
       - uses: yesolutions/mirror-action@master
         with:
-          REMOTE: https://jihulab.com/bin456789/reinstall.git
+          REMOTE: https://jihulab.com/tdede914-creator/reinstall.git
           GIT_USERNAME: username
           GIT_PASSWORD: ${{ secrets.JIHULAB_TOKEN }}
